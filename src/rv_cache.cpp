@@ -5,8 +5,13 @@
 #include <stdint.h>
 #include <time.h>
 #include <unistd.h>
-#include <malloc.h>
-#include <sys/resource.h>
+#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
+#include <malloc.h>       /* mallinfo(): heap arena size for the stats line */
+#include <sys/resource.h> /* getrusage(): user/sys cpu for the stats line */
+#else
+#include <windows.h>
+#include <psapi.h>        /* GetProcessMemoryInfo() / GetProcessTimes() */
+#endif
 #include <new>
 #include <rvcache/cache.h>
 #include <raimd/md_msg.h>
@@ -1115,6 +1120,7 @@ RvCache::print_stats( bool final_totals ) noexcept
   this->stats.cache_msg_count = this->cache.tab.pop_count();
   this->stats.cache_msg_bytes = this->cache.image_bytes;
 
+#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
 #if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
   struct mallinfo2 mi = mallinfo2();
 #else
@@ -1125,6 +1131,22 @@ RvCache::print_stats( bool final_totals ) noexcept
   ::getrusage( RUSAGE_SELF, &ru );
   this->stats.user_cpu_usecs = ru.ru_utime.tv_sec * 1e6 + ru.ru_utime.tv_usec;
   this->stats.sys_cpu_usecs  = ru.ru_stime.tv_sec * 1e6 + ru.ru_stime.tv_usec;
+#else
+  /* private committed bytes ~ heap arena; FILETIMEs are 100ns units */
+  PROCESS_MEMORY_COUNTERS_EX pmc;
+  pmc.cb = sizeof( pmc );
+  if ( ::GetProcessMemoryInfo( ::GetCurrentProcess(),
+                               (PROCESS_MEMORY_COUNTERS *) &pmc, sizeof( pmc ) ) )
+    this->stats.heap_mem_info = pmc.PrivateUsage;
+  FILETIME ct, et, kt, ut;
+  if ( ::GetProcessTimes( ::GetCurrentProcess(), &ct, &et, &kt, &ut ) ) {
+    ULARGE_INTEGER k, u;
+    k.LowPart = kt.dwLowDateTime; k.HighPart = kt.dwHighDateTime;
+    u.LowPart = ut.dwLowDateTime; u.HighPart = ut.dwHighDateTime;
+    this->stats.user_cpu_usecs = u.QuadPart / 10;
+    this->stats.sys_cpu_usecs  = k.QuadPart / 10;
+  }
+#endif
 
 #define P( S, X ) if ( final_totals ) { X = cur.S; b = true; } else if ( cur.S > old.S ) { X = cur.S - old.S; old.S = cur.S; b = true; }
 #define T( S, X ) if ( (X = cur.S) != old.S ) { old.S = cur.S; b = true; }
