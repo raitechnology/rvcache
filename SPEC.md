@@ -1377,6 +1377,82 @@ when dead bytes exceed live bytes and 1 KB.  Measured (TODO.md table):
 rebuild / 165 µs scan on an 8.4k-order book; the index never loses, so
 `map_index_min` defaults to 1.
 
+## Milestone 6 design — NATS nets (2026-10-16, draft for review)
+
+Goal: `rv_cache` speaks NATS on both sides, using natsmd's `EvNatsClient`
+the way it uses sassrv's `EvRvClient` — one client per declared net,
+`proto nats`, same roles (`feed` / `sub`). The subject schema is unchanged
+(NATS carries the sassrv schema: `_TIC.<subject>` ticks, `_SNAP.<subject>`
+snapshot requests with an inbox reply, dictionary subjects,
+`_SASS.<feed>.PUB` sass3 feed envelopes), so the cache, the snapshot
+service and the sass3 code paths are reused as-is; only the transport and
+the interest source are new.
+
+### Feed side: `EvNatsClient` feed net
+
+- SUB `_TIC.>` (and `_SASS.<feed>.PUB` when `sass3` is in the proto list);
+  ticks arrive as `EvPublish` with `msg_enc` 0 — detect the codec with
+  `MDMsg::is_msg_type` (as `natsMsg_GetMsgEnc` does in libnatsapi) before
+  the existing `on_tick` path. Everything after that is the sass2 path.
+- Snapshot requests to the upstream: `_SNAP.<subject>` published with
+  `reply = <inbox>.<id>` (NATS inbox = `_INBOX.<session>.>`, subscribed
+  once per client by `make_session`); the reply is the image, same as the
+  RV inbox reply. Dictionary fetch identical.
+- Fragments: natsmd reassembles `> max_payload` messages inside the
+  client; nothing to do here.
+
+### Sub side: interest without advisories
+
+NATS has no `LISTEN.START/STOP`; a client's `SUB` is visible only to the
+server it is connected to. Two ways to learn interest, both kept:
+
+1. **Explicit interest channel (primary).** NATS clients that want cached
+   data send the existing sass3 subscribe/unsubscribe request to
+   `_SASS.<feed>.SUB` (S submessage of subjects, QF_SUBSCRIBE /
+   QF_UNSUBSCRIBE, 480 s lease, RESUBSCRIBE refresh — wire format in the
+   appendix). `RvSubscriptionDB`'s sass3 holder/lease logic is transport
+   independent, so `on_sass3()` is reused unchanged; only the ingress is a
+   NATS SUB on `_SASS.*.SUB` instead of an RV wildcard listen. The client
+   side is raimdapi's `-api nats` transport: on `Subscribe()` it SUBs the
+   subject on its NATS server *and* sends the sass3 request; on
+   `Unsubscribe()` it unSUBs and sends the unsubscribe; a timer re-sends
+   RESUBSCRIBE before lease expiry. Data flows rv_cache -> NATS server ->
+   client on the plain subject; `rv_cache` publishes a tick only while the
+   subject has a live holder (interest bloom, as today).
+   - Works with any NATS server (nats-server, natsmd_server); no server
+     cooperation.
+   - Wildcard interest is not expressible (sass3 subjects are literal); a
+     client that SUBs `RSF.REC.*` must enumerate. Document, don't solve.
+   - Lease expiry is the only cleanup for a crashed client (480 s).
+2. **Embedded server (later, exact interest).** natsmd also has the
+   server side (`EvNatsService` / `natsmd_server`), like sassrv's
+   `EvRvService`. If `rv_cache` *is* the NATS server for its clients,
+   every SUB/UNSUB reaches it as `RouteNotify::on_sub/on_unsub` — exact,
+   immediate, wildcard-aware, no protocol. Same shape as embedding the
+   rvd role. Deferred: it changes deployment (clients connect to the
+   cache), and option 1 is needed anyway for clients behind a foreign
+   NATS server.
+
+### Config
+
+`-N sub nats <daemon> [feedname]` / yaml `{ role: sub, proto: nats,
+daemon: host:4222, feed: RSF }`; `-N feed nats <daemon>`. `daemon` may
+carry `user:pass@` or `token@` (natsmd `EvNatsClientParameters`). A sub
+net's `feed` names the `_SASS.<feed>.SUB` channel it answers on; default
+= the feed net's name.
+
+### Open questions for Chris
+
+- Should a NATS sub net also answer `_SNAP.<subject>` requests from
+  clients (serve images from cache over NATS)? Yes by symmetry with RV;
+  confirm.
+- Reply inbox: NATS `_INBOX.` prefix is the same string as RV's, so
+  `subject.h` inbox detection needs no change; confirm raimdapi's tibrv
+  path doesn't special-case the RV session id.
+- Lease length for NATS clients: keep 480 s or shorten (NATS clients
+  reconnect faster than RV sessions)?
+- Is option 2 wanted in this milestone or a later one?
+
 ## Open questions — resolved
 
 1. **Forward lookup without entry creation** *(re-resolved — submgr owns
