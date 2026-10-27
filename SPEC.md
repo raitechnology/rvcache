@@ -1403,6 +1403,23 @@ the interest source are new.
 
 ### Sub side: interest without advisories
 
+> **Superseded 2026-10-23.** natsmd's `EvNatsClient` now has an
+> `advisory` init switch (`EvNatsClientParameters::advisory`,
+> `natsTransportParams::advisory` in the C api, `natsmd_api_client -A`):
+> the session publishes `_NATS.<session>.START` / `.STATUS` (heartbeat,
+> 90 s default) / `.STOP`, `_NATS.<session>.LISTEN.START` /
+> `.LISTEN.STOP` with the subject in the body (`sub`, `refcnt`; a pattern
+> such as `RSF.>` can't be in a published subject), and answers the
+> subscription-list rpc on `_INBOX.<session>.SUBS` (`user`, unnamed
+> subject fields, `end=1`; `what:"sessions"` → the session). No host id:
+> it is only meaningful on a flat LAN. Subjects are bare (no `_<svc>.`
+> prefix). So the sub-side NATS net gets interest the same way the RV net
+> does — subscribe `_NATS.*.LISTEN.START`, `_NATS.*.LISTEN.STOP`,
+> `_NATS.*.STATUS`, `_NATS.*.STOP` and query `_INBOX.<session>.SUBS` on a
+> new session; `RvSubscriptionDB` needs a client abstraction (is_inbox /
+> make_inbox / publish2 / session) to run over `EvNatsClient`. The
+> `_SASS.<feed>.SUB` option below is kept for the record.
+
 NATS has no `LISTEN.START/STOP`; a client's `SUB` is visible only to the
 server it is connected to. Two ways to learn interest, both kept:
 
