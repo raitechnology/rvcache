@@ -38,6 +38,11 @@ parse_role_proto( NetDef &nd,  const char *role,  const char *proto ) noexcept
   else if ( ::strcmp( proto, "omm" ) == 0 ) {
     nd.s2 = false; nd.s3 = false; nd.omm = true;
   }
+  else if ( ::strcmp( proto, "nats" ) == 0 ) {
+    /* sass2 schema over NATS: _TIC ticks, _SNAP, the dictionary on
+     * _TIC.REPLY, interest from natsmd session advisories */
+    nd.s2 = true; nd.s3 = false; nd.nats = true;
+  }
   else
     return false;
   return true;

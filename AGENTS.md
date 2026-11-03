@@ -6,7 +6,7 @@ consumer side (native RV listeners, rv7 clients, OMM clients), keeps the
 latest image per subject in a raikv shm map (or heap), answers snapshot
 requests from cache, and forwards ticks only where there is interest
 (bloom-gated). Namespace `rvcache`. Depends on raikv, raimd, sassrv, omm,
-libdecnumber.
+natsmd, libdecnumber.
 
 **`SPEC.md` and `TODO.md` are the canonical design documents.** Read
 SPEC's "Milestone 3 design notes" (bloom-gated forwarding, batched shm
@@ -107,7 +107,8 @@ memory. `IMPLEMENTATION_NOTES.md` records implementation decisions.
 - `src/rv_cache.cpp` (service, nets, forwarding), `cache_tab.cpp`
   (`CacheEntry`, image store, shm merge), `config.cpp` (CLI + yaml),
   `map_merge.cpp`, `sass2.cpp`/`sass3.cpp` (feed/sub protocol legs),
-  `omm.cpp` (OMM feed and provider nets).
+  `omm.cpp` (OMM feed and provider nets), `nats.cpp` (NATS feed and sub
+  nets, `proto nats`, natsmd `EvNatsClient` + `NatsSubscriptionDB`).
 - `cache.yaml` — reference config (nets: 7500 feed / 7600, 7700, 7800
   subs). `test/basic.sh`, `test/shm.sh`, `test/omm.sh`. `map_bench`.
 - CLI: `rv_cache -h`; nets via `-N role proto [daemon [network [service
@@ -115,6 +116,24 @@ memory. `IMPLEMENTATION_NOTES.md` records implementation decisions.
   settable in the `-c` yaml. See README.
 
 ## Contracts and gotchas
+
+- **NATS nets (`proto nats`, SPEC Milestone 6).** daemon is
+  `[user:pass@|token@]host[:port]` of the NATS server, the -d base (an rv
+  daemon) is not used. Feed = SUB `_TIC.>` (`_TIC.<wild>.>`) into
+  `on_feed_msg`; natsmd delivers every message with `msg_enc` MD_STRING, so
+  `on_nats_feed_msg` detects the codec from the bytes first. Sub = a
+  `NatsSubscriptionDB` per net: interest only from clients that publish
+  `_NATS.<KIND>.<session>` advisories (`EvNatsClient` advisory on,
+  `natsmd_api_client -A`); a plain NATS SUB is invisible to the cache.
+  `publish_msg` falls back to `nats_conns[net]` when the net has no rv
+  client. natsmd's LISTEN.START of a subject carries the reply
+  `_INBOX.<session>.I.<subject>`; the INITIAL goes to that inbox and the
+  client's `fwd_pub` delivers it on `<subject>` to that subscriber only.
+  The INITIAL is broadcast on the subject only for interest found in a
+  SUBS reply (a resync after a network disruption, or rv_cache starting
+  after the listener) when the subject goes live (refcnt 1), as in sass2. The dictionary is served on
+  `_TIC.REPLY.SASS.DATA.DICTIONARY` (`serve_dictionary`, shared with rv).
+  No sass3 interest channel on a NATS sub net yet.
 
 - `CacheEntry` trailing `value[]/len` is the subject (it doubles as the
   RouteVec `RouteSub`).

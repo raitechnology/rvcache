@@ -1379,6 +1379,20 @@ rebuild / 165 µs scan on an 8.4k-order book; the index never loses, so
 
 ## Milestone 6 design — NATS nets (2026-10-16, draft for review)
 
+> **Implemented 2026-11-01 (sass2 schema over NATS):** `proto nats` feed
+> and sub nets in `src/nats.cpp`. Feed: SUB `_TIC.>`, codec detected from
+> the bytes (natsmd delivers MD_STRING). Sub: natsmd `NatsSubscriptionDB`
+> (`include/natsmd/submgr.h`) for interest from `_NATS.<KIND>.<session>`
+> advisories, `_SNAP.>` served from the cache, the cfile dictionary on
+> `_TIC.REPLY.SASS.DATA.DICTIONARY`. INITIAL to the LISTEN.START inbox
+> `_INBOX.<session>.I.<subject>` (delivered on the subject to that
+> subscriber only); broadcast only on resync from a SUBS reply. Verified
+> against nats-server 1.4.1 (~/go/bin) and the packaged v2.10.9
+> (/usr/sbin, fc41 rpm): rv feed -> NATS client
+> (dictionary 104596 bytes, INITIAL + ticks, `_SNAP` reply), NATS feed ->
+> NATS client, accounting with user + session. Not yet: the sass3
+> interest channel (option 1 below) on a NATS sub net.
+
 Goal: `rv_cache` speaks NATS on both sides, using natsmd's `EvNatsClient`
 the way it uses sassrv's `EvRvClient` — one client per declared net,
 `proto nats`, same roles (`feed` / `sub`). The subject schema is unchanged
@@ -1406,18 +1420,22 @@ the interest source are new.
 > **Superseded 2026-10-23.** natsmd's `EvNatsClient` now has an
 > `advisory` init switch (`EvNatsClientParameters::advisory`,
 > `natsTransportParams::advisory` in the C api, `natsmd_api_client -A`):
-> the session publishes `_NATS.<session>.START` / `.STATUS` (heartbeat,
-> 90 s default) / `.STOP`, `_NATS.<session>.LISTEN.START` /
-> `.LISTEN.STOP` with the subject in the body (`sub`, `refcnt`; a pattern
+> the session publishes `_NATS.START.<session>` / `_NATS.STATUS.<session>`
+> (heartbeat, 90 s default) / `_NATS.STOP.<session>`,
+> `_NATS.LISTEN.START.<session>` / `_NATS.LISTEN.STOP.<session>` (kind
+> first since 2026-11-01, so `_NATS.<KIND>.>` sees them) with the subject in the body (`sub`, `refcnt`; a pattern
 > such as `RSF.>` can't be in a published subject), and answers the
 > subscription-list rpc on `_INBOX.<session>.SUBS` (`user`, unnamed
 > subject fields, `end=1`; `what:"sessions"` → the session). No host id:
 > it is only meaningful on a flat LAN. Subjects are bare (no `_<svc>.`
 > prefix). So the sub-side NATS net gets interest the same way the RV net
-> does — subscribe `_NATS.*.LISTEN.START`, `_NATS.*.LISTEN.STOP`,
-> `_NATS.*.STATUS`, `_NATS.*.STOP` and query `_INBOX.<session>.SUBS` on a
-> new session; `RvSubscriptionDB` needs a client abstraction (is_inbox /
-> make_inbox / publish2 / session) to run over `EvNatsClient`. The
+> does — subscribe `_NATS.LISTEN.START.>`, `_NATS.LISTEN.STOP.>`,
+> `_NATS.START.>`, `_NATS.STATUS.>`, `_NATS.STOP.>` and query
+> `_INBOX.<session>.SUBS` on a new session. natsmd's own
+> `NatsSubscriptionDB` (`include/natsmd/submgr.h`, `src/submgr.cpp`,
+> monitor `natsmd_subtop`) is that port of `RvSubscriptionDB` over
+> `EvNatsClient`: no hosts, sessions resync on a `cn` change or an
+> `sc`/`sx` digest mismatch. The
 > `_SASS.<feed>.SUB` option below is kept for the record.
 
 NATS has no `LISTEN.START/STOP`; a client's `SUB` is visible only to the

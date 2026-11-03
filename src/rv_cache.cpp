@@ -114,13 +114,23 @@ RvCache::publish_msg( uint32_t net,  const char *subj,  size_t len,
                       const char *reply,  size_t reply_len,  const void *msg,
                       size_t msg_len,  uint32_t enc ) noexcept
 {
-  EvRvClient * c = net < MAX_NETS ? this->sub_conns[ net ] : NULL;
-  if ( c == NULL )
+  if ( net >= MAX_NETS )
     return;
-  uint32_t h = kv_crc_c( subj, len, 0 );
-  EvPublish pub( subj, len, reply, reply_len, msg, msg_len,
-                 c->sub_route, *c, h, enc );
-  c->publish( pub );
+  EvRvClient   * c  = this->sub_conns[ net ];
+  EvNatsClient * nc = this->nats_conns[ net ];
+  uint32_t       h  = kv_crc_c( subj, len, 0 );
+  if ( c != NULL ) {
+    EvPublish pub( subj, len, reply, reply_len, msg, msg_len,
+                   c->sub_route, *c, h, enc );
+    c->publish( pub );
+  }
+  else if ( nc != NULL ) { /* nats sub net (SPEC Milestone 6) */
+    EvPublish pub( subj, len, reply, reply_len, msg, msg_len,
+                   nc->sub_route, *nc, h, enc );
+    nc->publish( pub );
+  }
+  else
+    return;
   this->stats.msgs_sent++;
   this->stats.bytes_sent += len + reply_len + msg_len;
 }
@@ -513,7 +523,8 @@ RvCache::acct_event( const char *event,  const char *subj,  size_t sublen,
                      const RvSessionEntry *sess,  const char *proto,
                      uint16_t query_flags,  const char *reason,
                      double open_secs,  uint64_t msgs,
-                     uint64_t images,  const RvSass3Entry *s3 ) noexcept
+                     uint64_t images,  const RvSass3Entry *s3,
+                     const NatsSessionEntry *nsess ) noexcept
 {
   if ( this->acct == NULL )
     return;
@@ -544,6 +555,16 @@ RvCache::acct_event( const char *event,  const char *subj,  size_t sublen,
              hostip, sess->host_id );
     fprintf( this->acct, ",\"session\":\"%.*s\"",
              (int) sess->len, sess->value );
+  }
+  if ( nsess != NULL ) {
+    /* nats session: the user from its _NATS.START / SUBS reply, no host
+     * (the advisories carry none) */
+    if ( nsess->user_id != NULL )
+      fprintf( this->acct, ",\"user\":\"%s\"", nsess->user_id );
+    else
+      fprintf( this->acct, ",\"user\":null" );
+    fprintf( this->acct, ",\"session\":\"%.*s\"",
+             (int) nsess->len, nsess->value );
   }
   if ( s3 != NULL ) {
     /* sass3 holder identity from the SUB accounting submessage {U,H,A,P} */
@@ -740,6 +761,8 @@ main( int argc,  const char *argv[] )
     fprintf( stderr,
       "rv_cache [-d daemon] [-n network] [-s service] (defaults)\n"
       "  [-N role proto[ daemon[ network[ service[ wildcard]]]]] net (repeat)\n"
+      "      role feed|sub, proto sass2|sass3|both|omm|nats\n"
+      "      nats: daemon = [user:pass@|token@]host[:port] of a NATS server\n"
       "  [-p path]             = dictionary search path\n"
       "  [-c file]             = json/yaml config (.yaml/.yml = yaml)\n"
       "  [-m map_name]         = shm name to cache msgs\n"
@@ -757,7 +780,9 @@ main( int argc,  const char *argv[] )
       "         -N feed sass2 tcp:7600 'eth1;227.6.0.0' 7600 'RSF.>' \\\n"
       "         -c cache.yaml \\\n"
       "         -m sysv:raikv.shm \\\n"
-      "         -A subscript.log\n" );
+      "         -A subscript.log\n"
+      "rv_cache -N feed sass2 tcp:7500 '' 7500 \\\n"
+      "         -N sub nats 127.0.0.1:4222 '' '' 'RSF.>' -p rmds-config\n" );
     return 1;
   }
 
@@ -787,7 +812,7 @@ main( int argc,  const char *argv[] )
                             (uint32_t) j, nd ) ) {
       fprintf( stderr,
         "bad net tuple: %s %s (want role proto[ daemon[ network[ service [wild]]]],"
-        " role feed|sub, proto sass2|sass3|both|omm)\n", a, argv[ i + 1 ] );
+        " role feed|sub, proto sass2|sass3|both|omm|nats)\n", a, argv[ i + 1 ] );
       return 1;
     }
     cfg.nets.push( nd );
@@ -948,6 +973,57 @@ main( int argc,  const char *argv[] )
         poll.sub_route.add_route_notify( *osn );
         cache.omm_subs |= (uint64_t) 1 << ( nd.idx - 1 );
         cache.omm_listener = ol;
+      }
+      continue;
+    }
+    if ( nd.nats ) {
+      /* daemon = [user:pass@|token@]host[:port] (natsmd default 4222);
+       * the net's own daemon only, the -d base is an rv daemon */
+      char         name[ 32 ];
+      const char * hp    = nd.parm.daemon,
+                 * nuser = NULL,
+                 * npass = NULL,
+                 * ntok  = NULL;
+      ::snprintf( name, sizeof( name ), "rv_cache_net%u", nd.idx );
+      if ( hp != NULL ) {
+        const char * at = ::strrchr( hp, '@' );
+        if ( at != NULL ) {
+          char       * auth = ::strndup( hp, (size_t) ( at - hp ) );
+          char       * col  = ::strchr( auth, ':' );
+          if ( col != NULL ) {
+            *col  = '\0';
+            nuser = auth;
+            npass = col + 1;
+          }
+          else
+            ntok = auth;
+          hp = at + 1;
+        }
+      }
+      rai::natsmd::EvNatsClientParameters
+        nparm( hp, ::strdup( name ), nuser, npass, ntok );
+      EvNatsClient * nc = new ( aligned_malloc( sizeof( EvNatsClient ) ) )
+                          EvNatsClient( poll );
+      if ( nd.is_feed ) {
+        NatsFeedCB * fcb = new ( aligned_malloc( sizeof( NatsFeedCB ) ) )
+                           NatsFeedCB( poll, *nc, cache, nd.idx, nd.wildcard );
+        if ( ! nc->nats_connect( nparm, fcb, fcb ) ) {
+          fprintf( stderr, "Failed to connect net %u (nats feed)\n", nd.idx );
+          return 1;
+        }
+      }
+      else {
+        NatsSubCB * scb = new ( aligned_malloc( sizeof( NatsSubCB ) ) )
+                          NatsSubCB( poll, *nc, cache, nd.idx, nd.wildcard );
+        cache.nats_conns[ nd.idx - 1 ] = nc;
+        cache.nats_dbs[ nd.idx - 1 ]   = &scb->sub_db;
+        cache.sub_nets |= (uint64_t) 1 << ( nd.idx - 1 );
+        if ( cfg.verbose )
+          scb->sub_db.mout = &mout;
+        if ( ! nc->nats_connect( nparm, scb, scb ) ) {
+          fprintf( stderr, "Failed to connect net %u (nats sub)\n", nd.idx );
+          return 1;
+        }
       }
       continue;
     }

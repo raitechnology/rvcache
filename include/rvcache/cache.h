@@ -49,6 +49,13 @@ struct NetDef {
                       *        sub  = EvOmmListen provider (daemon =
                       *        listen [host:]port, service = announced
                       *        service name) */
+  bool     nats;     /* nats:  the sass2 schema over a NATS server
+                      *        (natsmd EvNatsClient, daemon =
+                      *        [user:pass@|token@]host[:port], 4222);
+                      *        feed = _TIC.> consumer;
+                      *        sub  = NatsSubscriptionDB interest from
+                      *        _NATS.<KIND>.<session> advisories, _SNAP
+                      *        and _TIC.REPLY (dictionary) served */
   NetParm  parm;
   const char * wildcard; /* per-net subject filter:
                           * sub  = submgr filter, both sass2 and sass3
@@ -56,7 +63,7 @@ struct NetDef {
                           * feed = subscribe _TIC.<wild>.> (sass2) or
                           *        _SASS.<wild>.PUB (sass3) */
   NetDef() : idx( 0 ), is_feed( false ), s2( false ), s3( false ),
-             omm( false ), wildcard( 0 ) {}
+             omm( false ), nats( false ), wildcard( 0 ) {}
 };
 
 struct Config {

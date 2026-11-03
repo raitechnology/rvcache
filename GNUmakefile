@@ -118,6 +118,7 @@ dec_home    := $(call test_makefile,libdecnumber)
 kv_home     := $(call test_makefile,raikv)
 sassrv_home := $(call test_makefile,sassrv)
 omm_home    := $(call test_makefile,omm)
+natsmd_home := $(call test_makefile,natsmd)
 
 ifeq (,$(dec_home))
 dec_home    := $(call test_makefile,$(md_home)/libdecnumber)
@@ -141,6 +142,22 @@ includes    += -I$(omm_home)/include
 else
 lnk_lib     += $(push_static) -lomm $(pop_static)
 dlnk_lib    += -lomm
+endif
+
+# natsmd: EvNatsClient + NatsSubscriptionDB for proto nats nets (SPEC
+# Milestone 6); depends on raimd/raikv below
+ifneq (,$(natsmd_home))
+natsmd_lib  := $(natsmd_home)/$(libd)/libnatsmd.a
+natsmd_dll  := $(natsmd_home)/$(libd)/libnatsmd.$(dll)
+lnk_lib     += $(natsmd_lib)
+lnk_dep     += $(natsmd_lib)
+dlnk_lib    += -L$(natsmd_home)/$(libd) -lnatsmd
+dlnk_dep    += $(natsmd_dll)
+rpath6       = ,-rpath,$(pwd)/$(natsmd_home)/$(libd)
+includes    += -I$(natsmd_home)/include
+else
+lnk_lib     += $(push_static) -lnatsmd $(pop_static)
+dlnk_lib    += -lnatsmd
 endif
 
 ifneq (,$(sassrv_home))
@@ -199,11 +216,11 @@ lnk_lib     += $(push_static) -lraikv $(pop_static)
 dlnk_lib    += -lraikv
 endif
 
-rpath   := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)$(rpath4)$(rpath5)
+rpath   := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)$(rpath4)$(rpath5)$(rpath6)
 lnk_lib += -Wl,--pop-state
 
 .PHONY: everything
-everything: $(kv_lib) $(dec_lib) $(md_lib) $(sassrv_lib) $(omm_lib) all
+everything: $(kv_lib) $(dec_lib) $(md_lib) $(sassrv_lib) $(natsmd_lib) $(omm_lib) all
 
 clean_subs :=
 # build submodules if have them
@@ -239,6 +256,14 @@ clean_sassrv:
 	$(MAKE) -C $(sassrv_home) clean
 clean_subs += clean_sassrv
 endif
+ifneq (,$(natsmd_home))
+$(natsmd_lib) $(natsmd_dll):
+	$(MAKE) -C $(natsmd_home)
+.PHONY: clean_natsmd
+clean_natsmd:
+	$(MAKE) -C $(natsmd_home) clean
+clean_subs += clean_natsmd
+endif
 ifneq (,$(omm_home))
 $(omm_lib) $(omm_dll):
 	$(MAKE) -C $(omm_home)
@@ -264,7 +289,7 @@ all_dlls    :=
 all_depends :=
 gen_files   :=
 
-rv_cache_files := rv_cache sass2 sass3 omm cache_tab map_merge config
+rv_cache_files := rv_cache sass2 sass3 omm nats cache_tab map_merge config
 rv_cache_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv_cache_files)))
 rv_cache_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv_cache_files)))
 rv_cache_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv_cache_files)))

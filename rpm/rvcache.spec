@@ -16,6 +16,7 @@ BuildRequires:  raimd _raimd_dep
 BuildRequires:  sassrv _sassrv_dep
 BuildRequires:  libdecnumber _libdecnumber_dep
 BuildRequires:  omm _omm_dep
+BuildRequires:  natsmd _natsmd_dep
 BuildRequires:  pcre2-devel
 BuildRequires:  git-core
 BuildRequires:  c-ares-devel
@@ -24,6 +25,7 @@ Requires:       raikv
 Requires:       raimd
 Requires:       sassrv
 Requires:       omm
+Requires:       natsmd
 Requires:       libdecnumber
 Requires:       pcre2
 Requires:       c-ares

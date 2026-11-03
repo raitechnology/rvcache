@@ -6,6 +6,8 @@
 #include <raikv/ev_publish.h>
 #include <omm/ev_omm_client.h>
 #include <omm/src_dir.h>
+#include <natsmd/ev_nats_client.h>
+#include <natsmd/submgr.h>
 
 namespace rvcache {
 
@@ -32,12 +34,17 @@ using rai::omm::EvOmmListen;
 using rai::omm::OmmDict;
 using rai::omm::OmmSourceDB;
 using rai::omm::OmmClientCB;
+using rai::natsmd::EvNatsClient;
+using rai::natsmd::NatsSubscriptionDB;
+using rai::natsmd::NatsSubscriptionListener;
+using rai::natsmd::NatsSessionEntry;
 
 /* the cache process: rv sub/feed nets (sass2 + sass3 interest channels),
- * omm feed/provider nets, one subject table.  Method bodies are split by
- * protocol:  rv_cache.cpp (core tick path, publish, stats, main),
- * sass2.cpp (LISTEN advisories + snapshot serving), sass3.cpp (sass3
- * interest channel), omm.cpp (OMM feed + provider sides). */
+ * omm feed/provider nets, nats feed/sub nets, one subject table.  Method
+ * bodies are split by protocol:  rv_cache.cpp (core tick path, publish,
+ * stats, main), sass2.cpp (LISTEN advisories + snapshot serving),
+ * sass3.cpp (sass3 interest channel), omm.cpp (OMM feed + provider
+ * sides), nats.cpp (NATS feed + sub sides, SPEC Milestone 6). */
 struct RvCache {
   EvPoll         & poll;
   EvShm          & shm;
@@ -48,7 +55,11 @@ struct RvCache {
   /* network attachments by mask bit (idx - 1); feeds have conns only */
   EvRvClient       * sub_conns[ MAX_NETS ];
   RvSubscriptionDB * sub_dbs[ MAX_NETS ];
-  uint64_t           sub_nets;  /* mask of configured sub nets */
+  uint64_t           sub_nets;  /* mask of configured sub nets (rv + nats) */
+  /* nats sub nets (SPEC Milestone 6): publish_msg() goes here when the
+   * net's sub_conns[] slot is empty */
+  EvNatsClient       * nats_conns[ MAX_NETS ];
+  NatsSubscriptionDB * nats_dbs[ MAX_NETS ];
   /* omm nets (SPEC Milestone 4): feed side = EvOmmClient consumers,
    * provider side = EvOmmListen serving OMM clients from the cache */
   EvOmmClient      * omm_conns[ MAX_NETS ]; /* omm feed clients */
@@ -76,6 +87,8 @@ struct RvCache {
     for ( uint32_t i = 0; i < MAX_NETS; i++ ) {
       this->sub_conns[ i ] = NULL;
       this->sub_dbs[ i ]   = NULL;
+      this->nats_conns[ i ] = NULL;
+      this->nats_dbs[ i ]   = NULL;
       this->omm_conns[ i ] = NULL;
       this->omm_wild[ i ]  = NULL;
     }
@@ -106,6 +119,22 @@ struct RvCache {
                     uint32_t net ) noexcept;
   void on_sass3( RvSubscriptionListener::Sass3 &sa3,  uint32_t net ) noexcept;
   void on_tic_reply( RvSubscriptionListener::Tic &tic,  uint32_t net ) noexcept;
+  /* the sass dictionary (cfile) to a _TIC.REPLY.SASS.DATA.DICTIONARY
+   * request's inbox, rv and nats sub nets */
+  void serve_dictionary( uint32_t net,  const char *subj,  size_t len,
+                         const char *reply,  size_t reply_len ) noexcept;
+  /* nats sub nets (nats.cpp): NatsSubscriptionDB callbacks, the sass2
+   * semantics over the natsmd session advisories */
+  void on_nats_listen_start( NatsSubscriptionListener::Start &add,
+                             uint32_t net ) noexcept;
+  void on_nats_listen_stop( NatsSubscriptionListener::Stop &rem,
+                            uint32_t net ) noexcept;
+  void on_nats_snapshot( NatsSubscriptionListener::Snap &snp,
+                         uint32_t net ) noexcept;
+  void on_nats_tic_reply( NatsSubscriptionListener::Tic &tic,
+                          uint32_t net ) noexcept;
+  /* nats feed nets: ticks arrive with msg_enc MD_STRING, detect the codec */
+  void on_nats_feed_msg( EvPublish &pub ) noexcept;
   /* omm feed side: EvOmmClient consumer (RWF -> sass at ingest, then
    * the normal handle_tic path; SPEC Milestone 4 feed side) */
   bool on_omm_feed_msg( uint32_t net,  const char *subj,  size_t len,
@@ -184,7 +213,8 @@ struct RvCache {
   void serve_snapshot( uint32_t net,  const char *subj,  size_t len,
                        const char *reply,  size_t reply_len,
                        const RvSessionEntry *sess,  uint16_t flags,
-                       const RvSass3Entry *s3 = NULL ) noexcept;
+                       const RvSass3Entry *s3 = NULL,
+                       const NatsSessionEntry *nsess = NULL ) noexcept;
   /* miss: TRANSIENT / NOT_FOUND to the reply inbox (bcast-nack); the one
    * code path shared by _SNAP, listen-start-inbox and sass3 requests */
   void serve_miss( uint32_t net,  const char *subj,  size_t len,
@@ -195,13 +225,64 @@ struct RvCache {
   void broadcast_initial( uint32_t net,  const char *subj,  size_t len,
                           const RvSessionEntry *sess,
                           const RvSass3Entry *s3,
-                          const char *proto ) noexcept;
+                          const char *proto,
+                          const NatsSessionEntry *nsess = NULL ) noexcept;
+  /* sess = rv session, s3 = sass3 holder, nsess = nats session (no host:
+   * the session name and the user from its START / SUBS reply) */
   void acct_event( const char *event,  const char *subj,  size_t sublen,
                    const RvSessionEntry *sess,  const char *proto,
                    uint16_t query_flags,  const char *reason,
                    double open_secs,  uint64_t msgs,
                    uint64_t images,
-                   const RvSass3Entry *s3 = NULL ) noexcept;
+                   const RvSass3Entry *s3 = NULL,
+                   const NatsSessionEntry *nsess = NULL ) noexcept;
+};
+
+/* nats.cpp: nats feed net -- SUB _TIC.> (or _TIC.<wild>.>), the ticks
+ * go to the same handle_tic path as an rv feed */
+struct NatsFeedCB : public EvConnectionNotify,
+                    public rai::natsmd::NatsClientCB {
+  EvPoll       & poll;
+  EvNatsClient & client;
+  RvCache      & cache;
+  const char   * wildcard; /* NULL = full firehose */
+  char           label[ 24 ];
+
+  NatsFeedCB( EvPoll &p,  EvNatsClient &c,  RvCache &rc,  uint32_t idx,
+              const char *wild ) noexcept;
+  virtual void on_connect( EvSocket &conn ) noexcept;
+  virtual void on_shutdown( EvSocket &conn,  const char *err,
+                            size_t errlen ) noexcept;
+  virtual bool on_nats_msg( EvPublish &pub ) noexcept;
+};
+
+/* nats.cpp: nats sub net -- a NatsSubscriptionDB per net, interest from
+ * the clients' _NATS.<KIND>.<session> advisories (EvNatsClient with
+ * advisory on), _SNAP.> served from the cache, _TIC.REPLY.> for the
+ * dictionary.  net = mask bit */
+struct NatsSubCB : public EvConnectionNotify,
+                   public rai::natsmd::NatsClientCB,
+                   public rai::kv::EvTimerCallback,
+                   public NatsSubscriptionListener {
+  EvPoll           & poll;
+  EvNatsClient     & client;
+  RvCache          & cache;
+  NatsSubscriptionDB sub_db;
+  uint32_t           net;      /* fwd_mask bit == idx - 1 */
+  const char       * wildcard; /* per-net submgr filter (NULL = none) */
+  char               label[ 24 ];
+
+  NatsSubCB( EvPoll &p,  EvNatsClient &c,  RvCache &rc,  uint32_t idx,
+             const char *wild ) noexcept;
+  virtual void on_connect( EvSocket &conn ) noexcept;
+  virtual void on_shutdown( EvSocket &conn,  const char *err,
+                            size_t errlen ) noexcept;
+  virtual bool on_nats_msg( EvPublish &pub ) noexcept;
+  virtual bool timer_cb( uint64_t,  uint64_t ) noexcept;
+  virtual void on_listen_start( Start &add ) noexcept;
+  virtual void on_listen_stop ( Stop  &rem ) noexcept;
+  virtual void on_snapshot    ( Snap  &snp ) noexcept;
+  virtual void on_tic_reply   ( Tic   &tic ) noexcept;
 };
 
 /* omm.cpp: omm feed net callback -- connection lifecycle + inbound RWF

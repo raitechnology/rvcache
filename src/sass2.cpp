@@ -143,7 +143,8 @@ void
 RvCache::serve_snapshot( uint32_t net,  const char *subj,  size_t len,
                          const char *reply,  size_t reply_len,
                          const RvSessionEntry *sess,  uint16_t flags,
-                         const RvSass3Entry *s3 ) noexcept
+                         const RvSass3Entry *s3,
+                         const NatsSessionEntry *nsess ) noexcept
 {
   if ( reply == NULL || reply_len == 0 )
     return;
@@ -163,8 +164,8 @@ RvCache::serve_snapshot( uint32_t net,  const char *subj,  size_t len,
     e->snap_count++;
     this->stats.snaps_sent++;
     this->acct_event( event, subj, len, sess,
-                      s3 != NULL ? "sass3" : "snap", flags,
-                      NULL, 0, 0, 0, s3 );
+                      s3 != NULL ? "sass3" : nsess != NULL ? "nats" : "snap",
+                      flags, NULL, 0, 0, 0, s3, nsess );
   }
   else {
     /* broadcast-feed miss: TRANSIENT / NOT_FOUND immediately (bcast-nack) */
@@ -188,7 +189,8 @@ void
 RvCache::broadcast_initial( uint32_t net,  const char *subj,  size_t len,
                             const RvSessionEntry *sess,
                             const RvSass3Entry *s3,
-                            const char *proto ) noexcept
+                            const char *proto,
+                            const NatsSessionEntry *nsess ) noexcept
 {
   CacheEntry * e = this->find_for_image( subj, len );
   void   * img;
@@ -200,5 +202,5 @@ RvCache::broadcast_initial( uint32_t net,  const char *subj,  size_t len,
   this->publish_msg( net, subj, len, NULL, 0, img, img_len, img_enc );
   e->snap_count++;
   this->acct_event( "initial", subj, len, sess, proto, 0,
-                    NULL, 0, 0, 0, s3 );
+                    NULL, 0, 0, 0, s3, nsess );
 }

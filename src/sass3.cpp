@@ -154,18 +154,26 @@ void
 RvCache::on_tic_reply( RvSubscriptionListener::Tic &tic,
                        uint32_t net ) noexcept
 {
+  this->serve_dictionary( net, tic.sub.value, tic.sub.len, tic.reply,
+                          tic.reply_len );
+}
+
+/* _TIC.REPLY.SASS.DATA.DICTIONARY with an inbox: the cfile dictionary,
+ * packed as the sass dictionary message (rv and nats sub nets) */
+void
+RvCache::serve_dictionary( uint32_t net,  const char *subj,  size_t len,
+                           const char *reply,  size_t reply_len ) noexcept
+{
   static const char dd[] = "_TIC.REPLY.SASS.DATA.DICTIONARY";
-  const char * subj = tic.sub.value;
-  size_t       len  = tic.sub.len;
 
   if ( len == sizeof( dd ) - 1 && ::memcmp( subj, dd, len ) == 0 ) {
-    if ( tic.reply_len > 0 && this->cache.dict.cfile_dict != NULL ) {
+    if ( reply_len > 0 && this->cache.dict.cfile_dict != NULL ) {
       MDMsgMem mem;
       size_t   sz  = 1024 * 1024;
       void   * bp  = mem.make( sz );
       TibMsgWriter w( mem, bp, sz );
       CFile::pack_sass( this->cache.dict.cfile_dict, w );
-      this->publish_msg( net, tic.reply, tic.reply_len, NULL, 0, w.buf,
+      this->publish_msg( net, reply, reply_len, NULL, 0, w.buf,
                          w.off + w.hdrlen, TIBMSG_TYPE_ID );
     }
   }
